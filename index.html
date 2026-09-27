@@ -4089,7 +4089,23 @@
 
   let activeCategory = "All";
   let searchTerm = "";
-  let enquiryCart = JSON.parse(localStorage.getItem("shreeMartEnquiryCart") || "[]");
+  function loadCart(){
+    try{
+      const raw = localStorage.getItem("shreeMartEnquiryCart");
+      const parsed = raw ? JSON.parse(raw) : [];
+      if(!Array.isArray(parsed)) return [];
+      return parsed
+        .map(item=>({id:Number(item && item.id),qty:Number(item && item.qty)}))
+        .filter(item=>Number.isFinite(item.id) && Number.isFinite(item.qty) && item.qty > 0)
+        .map(item=>({id:item.id,qty:Math.min(99,Math.max(1,Math.floor(item.qty))) }));
+    }catch(error){
+      console.warn("Shree Mart: invalid saved enquiry cart was cleared.", error);
+      try{ localStorage.removeItem("shreeMartEnquiryCart"); }catch(_){}
+      return [];
+    }
+  }
+
+  let enquiryCart = loadCart();
   let activeModalProduct = null;
   let toastTimer;
 
@@ -4106,11 +4122,18 @@
   }
 
   function persistCart(){
-    localStorage.setItem("shreeMartEnquiryCart", JSON.stringify(enquiryCart));
+    try{
+      localStorage.setItem("shreeMartEnquiryCart", JSON.stringify(enquiryCart));
+    }catch(error){
+      console.warn("Shree Mart: enquiry cart could not be saved.", error);
+    }
     renderCart();
   }
 
-  function getProduct(id){return PRODUCT_DATA.find(p=>p.id===id)}
+  function getProduct(id){
+    const numericId = Number(id);
+    return PRODUCT_DATA.find(p=>Number(p.id)===numericId);
+  }
 
   function filteredProducts(){
     return PRODUCT_DATA.filter(p=>{
@@ -4162,23 +4185,32 @@
   }
 
   function addToCart(id,qty=1){
-    const existing = enquiryCart.find(i=>i.id===id);
-    if(existing) existing.qty = Math.min(99, existing.qty + qty);
-    else enquiryCart.push({id,qty:Math.min(99,Math.max(1,qty))});
+    const numericId = Number(id);
+    const product = getProduct(numericId);
+    if(!product) return;
+    const safeQty = Math.min(99,Math.max(1,Math.floor(Number(qty)||1)));
+    const existing = enquiryCart.find(i=>Number(i.id)===numericId);
+    if(existing){
+      existing.id = numericId;
+      existing.qty = Math.min(99, existing.qty + safeQty);
+    }else{
+      enquiryCart.push({id:numericId,qty:safeQty});
+    }
     persistCart();
-    const product=getProduct(id);
     showToast(`${product.name} added to enquiry`);
   }
 
   function setCartQty(id,qty){
-    const item=enquiryCart.find(i=>i.id===id);
+    const numericId = Number(id);
+    const item=enquiryCart.find(i=>Number(i.id)===numericId);
     if(!item) return;
     item.qty=Math.min(99,Math.max(1,Number(qty)||1));
     persistCart();
   }
 
   function removeFromCart(id){
-    enquiryCart=enquiryCart.filter(i=>i.id!==id);
+    const numericId = Number(id);
+    enquiryCart=enquiryCart.filter(i=>Number(i.id)!==numericId);
     persistCart();
     showToast("Item removed");
   }
@@ -4201,14 +4233,30 @@
     }).join("");
   }
 
+  function openWhatsApp(message){
+    const url=`https://wa.me/${STORE.whatsapp}?text=${encodeURIComponent(message)}`;
+    const popup=window.open(url,"_blank","noopener,noreferrer");
+    if(!popup) window.location.href=url;
+  }
+
   function sendCartToWhatsApp(){
-    if(!enquiryCart.length) return;
-    const lines=enquiryCart.map((item,i)=>{
-      const p=getProduct(item.id);
+    const validItems=enquiryCart
+      .map(item=>({item,p:getProduct(item.id)}))
+      .filter(row=>row.p);
+    if(!validItems.length){
+      showToast("Add at least one valid product first");
+      return;
+    }
+    if(validItems.length!==enquiryCart.length){
+      enquiryCart=validItems.map(row=>row.item);
+      persistCart();
+    }
+    const lines=validItems.map((row,i)=>{
+      const {item,p}=row;
       return `${i+1}. ${p.name} — Qty ${item.qty}${p.price!==null?` — ${rupee(p.price)} each`:''}`;
     });
     const msg=`Hello Shree Mart,\n\nI would like to enquire/order about these products:\n${lines.join('\n')}\n\nPlease confirm availability and final pricing. Thank you.`;
-    window.open(`https://wa.me/${STORE.whatsapp}?text=${encodeURIComponent(msg)}`,"_blank","noopener");
+    openWhatsApp(msg);
   }
 
   function openCart(){
@@ -4245,15 +4293,31 @@
     const type=String(data.get("type")||"General enquiry");
     const date=String(data.get("date")||"").trim();
     const message=String(data.get("message")||"").trim();
+    if(!name || !message){
+      showToast("Please enter your name and requirement");
+      return;
+    }
+    if(phone && !/^[+0-9()\s-]{7,15}$/.test(phone)){
+      showToast("Please enter a valid phone number");
+      return;
+    }
     const lines=[`Hello Shree Mart,`,``,`Name: ${name}`, phone?`Phone: ${phone}`:null,`Enquiry type: ${type}`,date?`Date / requirement date: ${date}`:null,``,`Requirement:`,message].filter(Boolean);
-    window.open(`https://wa.me/${STORE.whatsapp}?text=${encodeURIComponent(lines.join('\n'))}`,"_blank","noopener");
+    openWhatsApp(lines.join('\n'));
   }
 
   function openEnquiryType(type){
-    document.querySelector('#enquiry').scrollIntoView({behavior:'smooth'});
+    const section=$("#enquiry");
     const select=$("#enquiryType");
-    select.value=type === 'bulk' ? 'Bulk / wholesale' : 'Party order';
-    $("#enquiryMessage").focus();
+    const message=$("#enquiryMessage");
+    const isBulk=type === 'bulk';
+    select.value=isBulk ? 'Bulk / wholesale' : 'Party order';
+    if(!message.value.trim()){
+      message.value=isBulk
+        ? "I need a bulk/wholesale quotation. Please confirm available products, quantities and bulk rates."
+        : "I want to place a party order. Please confirm availability, quantities and party pricing.";
+    }
+    section.scrollIntoView({behavior:'smooth',block:'start'});
+    setTimeout(()=>message.focus(),350);
   }
 
   function setupFAQ(){
@@ -4287,8 +4351,8 @@
       if(category){activeCategory=category.dataset.category;searchTerm="";$("#globalSearch").value="";renderFilters();renderProducts();document.querySelector('#catalog').scrollIntoView({behavior:'smooth',block:'start'});return;}
       const add=e.target.closest("[data-add]"); if(add){addToCart(add.dataset.add,1);return;}
       const view=e.target.closest("[data-view]"); if(view){openProduct(view.dataset.view);return;}
-      const plus=e.target.closest("[data-cart-plus]"); if(plus){const item=enquiryCart.find(i=>i.id===plus.dataset.cartPlus);if(item)setCartQty(item.id,item.qty+1);return;}
-      const minus=e.target.closest("[data-cart-minus]"); if(minus){const item=enquiryCart.find(i=>i.id===minus.dataset.cartMinus);if(item)setCartQty(item.id,item.qty-1);return;}
+      const plus=e.target.closest("[data-cart-plus]"); if(plus){const item=enquiryCart.find(i=>Number(i.id)===Number(plus.dataset.cartPlus));if(item)setCartQty(item.id,item.qty+1);return;}
+      const minus=e.target.closest("[data-cart-minus]"); if(minus){const item=enquiryCart.find(i=>Number(i.id)===Number(minus.dataset.cartMinus));if(item)setCartQty(item.id,item.qty-1);return;}
       const remove=e.target.closest("[data-remove]"); if(remove){removeFromCart(remove.dataset.remove);return;}
       if(e.target.closest("[data-close-cart]")){closeCart();return;}
       if(e.target.closest("[data-close-modal]")){closeProduct();return;}
